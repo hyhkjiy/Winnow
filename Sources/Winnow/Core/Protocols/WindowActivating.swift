@@ -1,6 +1,6 @@
 import Foundation
 
-protocol WindowActivating {
+protocol WindowActivating: Sendable {
   func activate(_ window: WindowItem) async throws
 }
 

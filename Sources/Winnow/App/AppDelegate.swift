@@ -23,6 +23,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       },
       onRequestAccessibility: { [weak self] in
         self?.environment.permissionClient.requestAccess()
+      },
+      onDiscoverWindows: { [weak self] in
+        guard let self else {
+          return []
+        }
+        return try await self.environment.windowDiscovery.discoverWindows()
+      },
+      onActivateWindow: { [weak self] window in
+        guard let self else {
+          return
+        }
+
+        do {
+          try await self.environment.windowActivator.activate(window)
+        } catch {
+          PrivacyLogger.windowFailure(
+            processIdentifier: window.processIdentifier,
+            code: -1
+          )
+        }
       }
     )
 

@@ -31,6 +31,20 @@ final class AppEnvironment {
   static func live() -> AppEnvironment {
     let permissionClient = AccessibilityPermissionClient()
     let searchSession = SearchSession()
+    let accessibilityClient = LiveAXWindowSystemClient()
+    let accessibilityQueue = DispatchQueue(
+      label: "app.winnow.accessibility",
+      qos: .userInitiated
+    )
+    let windowDiscovery = AXWindowDiscovery(
+      systemClient: accessibilityClient,
+      queue: accessibilityQueue
+    )
+    let windowActivator = AXWindowActivator(
+      systemClient: accessibilityClient,
+      windowDiscovery: windowDiscovery,
+      queue: accessibilityQueue
+    )
 
     return AppEnvironment(
       permissionClient: permissionClient,
@@ -40,8 +54,8 @@ final class AppEnvironment {
       settingsWindowController: SettingsWindowController(
         permissionClient: permissionClient
       ),
-      windowDiscovery: EmptyWindowDiscovery(),
-      windowActivator: EmptyWindowActivator()
+      windowDiscovery: windowDiscovery,
+      windowActivator: windowActivator
     )
   }
 }
