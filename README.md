@@ -35,9 +35,10 @@ Run `make help` to list all development commands. The Makefile is a thin,
 discoverable entry point; SwiftPM still owns compilation and dependency
 management, while shell scripts own multi-step packaging operations.
 
-`make run` builds the app bundle and launches its executable in the foreground,
-so the process uses the same bundle identity and `LSUIElement` metadata as the
-Accessibility permission entry. Stop it with `Ctrl+C`.
+`make run` builds the app bundle and asks LaunchServices to open it, so macOS
+attributes Accessibility requests to Winnow instead of the terminal that
+started the command. Use the Winnow menu's Quit command to stop it; `make run`
+returns after the app exits.
 
 ## Build an app bundle
 

@@ -22,7 +22,7 @@ test:
 	swift test --configuration $(CONFIGURATION)
 
 run: app
-	$(APP_BUNDLE)/Contents/MacOS/Winnow
+	open -W $(APP_BUNDLE)
 
 format:
 	swift format --in-place --recursive Sources Tests Package.swift
