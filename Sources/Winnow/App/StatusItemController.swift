@@ -36,10 +36,22 @@ final class StatusItemController: NSObject, NSMenuDelegate {
       return
     }
 
-    button.image = NSImage(
-      systemSymbolName: "rectangle.stack.badge.magnifyingglass",
-      accessibilityDescription: "Winnow"
-    )
+    let image =
+      NSImage(
+        systemSymbolName: "rectangle.stack",
+        accessibilityDescription: "Winnow"
+      )
+      ?? NSImage(
+        systemSymbolName: "magnifyingglass",
+        accessibilityDescription: "Winnow"
+      )
+    image?.isTemplate = true
+
+    button.image = image
+    button.toolTip = "Winnow"
+    if image == nil {
+      button.title = "W"
+    }
   }
 
   private func configureMenu() {
