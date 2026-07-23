@@ -21,8 +21,8 @@ build:
 test:
 	swift test --configuration $(CONFIGURATION)
 
-run:
-	swift run --configuration $(CONFIGURATION) Winnow
+run: app
+	$(APP_BUNDLE)/Contents/MacOS/Winnow
 
 format:
 	swift format --in-place --recursive Sources Tests Package.swift

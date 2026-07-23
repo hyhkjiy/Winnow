@@ -35,8 +35,9 @@ Run `make help` to list all development commands. The Makefile is a thin,
 discoverable entry point; SwiftPM still owns compilation and dependency
 management, while shell scripts own multi-step packaging operations.
 
-Running with `make run` is useful for development, but it does not apply the
-bundle metadata required by an Agent application.
+`make run` builds the app bundle and launches its executable in the foreground,
+so the process uses the same bundle identity and `LSUIElement` metadata as the
+Accessibility permission entry. Stop it with `Ctrl+C`.
 
 ## Build an app bundle
 
@@ -49,6 +50,11 @@ Use `make verify` to build the bundle and validate its Info.plist and signature.
 The underlying script creates `.build/app/Winnow.app` with `LSUIElement=true`.
 It performs an ad-hoc signature for local development only; Developer ID
 signing and notarization belong to the release version.
+
+Because the local signature is ad hoc, changing the executable can invalidate
+the existing Accessibility grant. If that happens, remove the old Winnow entry
+from System Settings, run `make app`, add `.build/app/Winnow.app` again, and
+restart Winnow without rebuilding it.
 
 ## Validate Accessibility window switching
 
