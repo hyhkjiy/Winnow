@@ -1,7 +1,19 @@
 import AppKit
 import Combine
 
+private final class WindowSearchFieldCell: NSSearchFieldCell {
+  // Keep the native editing geometry while drawing the search area without a bezel.
+  override func draw(withFrame frame: NSRect, in controlView: NSView) {
+    drawInterior(withFrame: frame, in: controlView)
+  }
+}
+
 private final class WindowSearchField: NSSearchField {
+  override class var cellClass: AnyClass? {
+    get { WindowSearchFieldCell.self }
+    set { super.cellClass = newValue }
+  }
+
   var onMoveSelection: ((Int) -> Void)?
   var onNavigateHierarchy: ((Int) -> Void)?
   var onConfirmSelection: (() -> Void)?
@@ -67,6 +79,95 @@ private final class WindowResultsOutlineView: NSOutlineView {
   }
 }
 
+private final class WindowResultsScrollView: NSScrollView {
+  override func tile() {
+    super.tile()
+    guard let table = documentView as? NSTableView else { return }
+    let width = contentView.bounds.width
+    guard width > 0 else { return }
+    if table.frame.width != width {
+      table.setFrameSize(NSSize(width: width, height: table.frame.height))
+    }
+    if let column = table.tableColumns.first, column.width != width {
+      column.width = width
+    }
+  }
+}
+
+private final class SearchSurfaceView: NSView {
+  override var wantsUpdateLayer: Bool { true }
+
+  override func viewDidChangeEffectiveAppearance() {
+    super.viewDidChangeEffectiveAppearance()
+    needsDisplay = true
+  }
+
+  override func updateLayer() {
+    layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+    layer?.borderColor = NSColor.separatorColor.withAlphaComponent(0.5).cgColor
+  }
+}
+
+private final class SearchResultRowView: NSTableRowView {
+  override var interiorBackgroundStyle: NSView.BackgroundStyle { .normal }
+
+  override func drawSelection(in dirtyRect: NSRect) {
+    guard selectionHighlightStyle != .none else { return }
+    NSColor.controlAccentColor.withAlphaComponent(0.12).setFill()
+    NSBezierPath(roundedRect: bounds.insetBy(dx: 2, dy: 1), xRadius: 8, yRadius: 8).fill()
+  }
+}
+
+private final class SearchResultCell: NSTableCellView {
+  let icon = NSImageView()
+  let titleLabel = NSTextField(labelWithString: "")
+  let detailLabel = NSTextField(labelWithString: "")
+  let countLabel = NSTextField(labelWithString: "")
+
+  override init(frame frameRect: NSRect) {
+    super.init(frame: frameRect)
+    icon.imageScaling = .scaleProportionallyDown
+    titleLabel.font = .systemFont(ofSize: 14, weight: .medium)
+    titleLabel.textColor = .labelColor
+    detailLabel.font = .systemFont(ofSize: 11)
+    detailLabel.textColor = .secondaryLabelColor
+    countLabel.font = .systemFont(ofSize: 11)
+    countLabel.textColor = .secondaryLabelColor
+    countLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+    countLabel.setContentHuggingPriority(.required, for: .horizontal)
+    for label in [titleLabel, detailLabel] {
+      label.lineBreakMode = .byTruncatingTail
+      label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+    }
+    let text = NSStackView(views: [titleLabel, detailLabel])
+    text.orientation = .vertical
+    text.alignment = .leading
+    text.spacing = 2
+    for child in [icon, text, countLabel] {
+      child.translatesAutoresizingMaskIntoConstraints = false
+      addSubview(child)
+    }
+    textField = titleLabel
+    imageView = icon
+    NSLayoutConstraint.activate([
+      icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
+      icon.centerYAnchor.constraint(equalTo: centerYAnchor),
+      icon.widthAnchor.constraint(equalToConstant: 24),
+      icon.heightAnchor.constraint(equalToConstant: 24),
+      text.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 10),
+      text.centerYAnchor.constraint(equalTo: centerYAnchor),
+      titleLabel.trailingAnchor.constraint(equalTo: text.trailingAnchor),
+      detailLabel.trailingAnchor.constraint(equalTo: text.trailingAnchor),
+      text.trailingAnchor.constraint(equalTo: countLabel.leadingAnchor, constant: -12),
+      countLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+      countLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
+    ])
+  }
+
+  @available(*, unavailable)
+  required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+}
+
 @MainActor
 final class SearchPanelViewController: NSViewController,
   NSSearchFieldDelegate,
@@ -78,17 +179,21 @@ final class SearchPanelViewController: NSViewController,
   var onRetryDiscovery: (() -> Void)?
   var onRequestAccessibility: (() -> Void)?
   var onCancel: (() -> Void)?
+  var onPreferredHeightChange: ((CGFloat) -> Void)?
 
   private let session: SearchSession
   private let searchField = WindowSearchField()
   private let outlineView = WindowResultsOutlineView()
-  private let scrollView = NSScrollView()
+  private let scrollView = WindowResultsScrollView()
   private let statusContainer = NSView()
   private let statusLabel = NSTextField(labelWithString: "")
+  private let shortcutLabel = NSTextField(labelWithString: "")
+  private var applicationIcons: [pid_t: NSImage] = [:]
   private let freshnessLabel = NSTextField(labelWithString: "")
   private let statusButton = NSButton()
   private let progressIndicator = NSProgressIndicator()
   private var cancellables = Set<AnyCancellable>()
+  private var resultsBottomConstraint: NSLayoutConstraint?
   private var renderScheduled = false
   private(set) var isPrimary = false
 
@@ -103,12 +208,11 @@ final class SearchPanelViewController: NSViewController,
   }
 
   override func loadView() {
-    let rootView = NSView()
+    let rootView = SearchSurfaceView()
     rootView.wantsLayer = true
     rootView.layer?.cornerRadius = 16
     rootView.layer?.masksToBounds = true
-    rootView.layer?.backgroundColor =
-      NSColor.windowBackgroundColor.withAlphaComponent(0.96).cgColor
+    rootView.layer?.borderWidth = 1
 
     configureSearchField()
     configureOutlineView()
@@ -121,6 +225,15 @@ final class SearchPanelViewController: NSViewController,
     freshnessLabel.textColor = .secondaryLabelColor
     freshnessLabel.translatesAutoresizingMaskIntoConstraints = false
     rootView.addSubview(freshnessLabel)
+    shortcutLabel.font = .systemFont(ofSize: 11)
+    shortcutLabel.textColor = .secondaryLabelColor
+    shortcutLabel.lineBreakMode = .byTruncatingTail
+    shortcutLabel.translatesAutoresizingMaskIntoConstraints = false
+    rootView.addSubview(shortcutLabel)
+    let separator = NSBox()
+    separator.boxType = .separator
+    separator.translatesAutoresizingMaskIntoConstraints = false
+    rootView.addSubview(separator)
 
     let clickRecognizer = NSClickGestureRecognizer(
       target: self,
@@ -129,56 +242,62 @@ final class SearchPanelViewController: NSViewController,
     clickRecognizer.delaysPrimaryMouseButtonEvents = false
     rootView.addGestureRecognizer(clickRecognizer)
 
+    let resultsBottom = scrollView.bottomAnchor.constraint(
+      equalTo: rootView.bottomAnchor, constant: -38)
+    resultsBottomConstraint = resultsBottom
     NSLayoutConstraint.activate([
       searchField.leadingAnchor.constraint(
         equalTo: rootView.leadingAnchor,
-        constant: 24
+        constant: 20
       ),
       searchField.trailingAnchor.constraint(
         equalTo: rootView.trailingAnchor,
-        constant: -24
+        constant: -20
       ),
       searchField.topAnchor.constraint(
         equalTo: rootView.topAnchor,
-        constant: 24
+        constant: 20
       ),
-      searchField.heightAnchor.constraint(equalToConstant: 40),
+      searchField.heightAnchor.constraint(equalToConstant: 36),
 
       scrollView.leadingAnchor.constraint(
         equalTo: rootView.leadingAnchor,
-        constant: 16
+        constant: 12
       ),
       scrollView.trailingAnchor.constraint(
         equalTo: rootView.trailingAnchor,
-        constant: -16
+        constant: -12
       ),
       scrollView.topAnchor.constraint(
         equalTo: searchField.bottomAnchor,
-        constant: 14
+        constant: 16
       ),
-      scrollView.bottomAnchor.constraint(
-        equalTo: rootView.bottomAnchor,
-        constant: -38
-      ),
-      freshnessLabel.leadingAnchor.constraint(equalTo: rootView.leadingAnchor, constant: 24),
-      freshnessLabel.trailingAnchor.constraint(equalTo: rootView.trailingAnchor, constant: -24),
-      freshnessLabel.bottomAnchor.constraint(equalTo: rootView.bottomAnchor, constant: -12),
+      resultsBottom,
+      separator.leadingAnchor.constraint(equalTo: rootView.leadingAnchor, constant: 20),
+      separator.trailingAnchor.constraint(equalTo: rootView.trailingAnchor, constant: -20),
+      separator.topAnchor.constraint(equalTo: searchField.bottomAnchor, constant: 8),
+      shortcutLabel.leadingAnchor.constraint(equalTo: rootView.leadingAnchor, constant: 20),
+      shortcutLabel.trailingAnchor.constraint(equalTo: rootView.trailingAnchor, constant: -20),
+      shortcutLabel.bottomAnchor.constraint(equalTo: rootView.bottomAnchor, constant: -14),
+      freshnessLabel.leadingAnchor.constraint(equalTo: rootView.leadingAnchor, constant: 20),
+      freshnessLabel.trailingAnchor.constraint(equalTo: rootView.trailingAnchor, constant: -20),
+      freshnessLabel.bottomAnchor.constraint(equalTo: shortcutLabel.topAnchor, constant: -5),
 
       statusContainer.leadingAnchor.constraint(
         equalTo: rootView.leadingAnchor,
-        constant: 24
+        constant: 20
       ),
       statusContainer.trailingAnchor.constraint(
         equalTo: rootView.trailingAnchor,
-        constant: -24
+        constant: -20
       ),
       statusContainer.topAnchor.constraint(
         equalTo: searchField.bottomAnchor,
-        constant: 14
+        constant: 16
       ),
       statusContainer.bottomAnchor.constraint(
         equalTo: rootView.bottomAnchor,
-        constant: -38
+        constant: -58
       ),
     ])
 
@@ -208,6 +327,29 @@ final class SearchPanelViewController: NSViewController,
       return
     }
     session.updateQuery(searchField.stringValue)
+  }
+
+  func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector)
+    -> Bool
+  {
+    guard isPrimary else { return false }
+    switch commandSelector {
+    case #selector(NSResponder.moveDown(_:)):
+      session.moveSelection(by: 1)
+    case #selector(NSResponder.moveUp(_:)):
+      session.moveSelection(by: -1)
+    case #selector(NSResponder.insertNewline(_:)):
+      activateSelectedWindow()
+    case #selector(NSResponder.cancelOperation(_:)):
+      onCancel?()
+    case #selector(NSResponder.moveLeft(_:)) where searchField.stringValue.isEmpty:
+      navigateHierarchy(direction: -1)
+    case #selector(NSResponder.moveRight(_:)) where searchField.stringValue.isEmpty:
+      navigateHierarchy(direction: 1)
+    default:
+      return false
+    }
+    return true
   }
 
   func outlineView(
@@ -279,24 +421,44 @@ final class SearchPanelViewController: NSViewController,
       return nil
     }
 
-    let identifier = NSUserInterfaceItemIdentifier(
-      node.isApplication ? "ApplicationResultCell" : "WindowResultCell"
-    )
+    let identifier = NSUserInterfaceItemIdentifier("SearchResultCell")
     let cell =
-      outlineView.makeView(withIdentifier: identifier, owner: self)
-      as? NSTableCellView
-      ?? makeResultCell(identifier: identifier)
-    cell.textField?.stringValue = confidencePrefixedTitle(for: node)
-    cell.textField?.font =
+      outlineView.makeView(withIdentifier: identifier, owner: self) as? SearchResultCell
+      ?? SearchResultCell(frame: .zero)
+    cell.identifier = identifier
+    let window = node.window ?? node.children.first?.window
+    let isChild = session.parentApplication(of: node.id) != nil
+    cell.titleLabel.stringValue =
       node.isApplication
-      ? .systemFont(ofSize: 14, weight: .semibold)
-      : .systemFont(ofSize: 14)
-    cell.textField?.textColor =
-      node.isApplication ? .labelColor : .secondaryLabelColor
+      ? (window?.applicationName ?? node.displayTitle)
+      : (window.map { $0.title.isEmpty ? $0.applicationName : $0.title } ?? node.displayTitle)
+    cell.titleLabel.font = .systemFont(
+      ofSize: node.isApplication ? 12 : 14,
+      weight: node.isApplication ? .semibold : .medium)
+    cell.titleLabel.textColor = node.isApplication ? .secondaryLabelColor : .labelColor
+    var details: [String] = []
+    if !node.isApplication, !isChild, let window,
+      cell.titleLabel.stringValue != window.applicationName
+    {
+      details.append(window.applicationName)
+    }
+    if let window = node.window {
+      if window.isMinimized { details.append("Minimized") }
+      if case .stale = window.discoveryFreshness { details.append("Last known") }
+      if window.discoveryConfidence == .probable { details.append("Likely match") }
+      if window.discoveryConfidence == .inventoryOnly { details.append("Limited access") }
+    }
+    cell.detailLabel.stringValue = details.joined(separator: " · ")
+    cell.detailLabel.isHidden = details.isEmpty
+    cell.countLabel.stringValue = node.isApplication ? "\(node.children.count) windows" : ""
+    cell.icon.image =
+      window.flatMap { applicationIcon(for: $0) }
+      ?? NSImage(systemSymbolName: "macwindow", accessibilityDescription: "Window")
+    cell.toolTip = node.window.map { "\($0.applicationName) — \($0.title)" }
     if let window = node.window, case .stale = window.discoveryFreshness {
-      cell.toolTip = "This app did not respond to the latest refresh. Showing its last known window."
-    } else {
-      cell.toolTip = nil
+      cell.toolTip =
+        (cell.toolTip ?? "")
+        + "\nThis app did not respond to the latest refresh. Showing its last known window."
     }
     return cell
   }
@@ -310,12 +472,17 @@ final class SearchPanelViewController: NSViewController,
       return
     }
     session.selectNode(id: node.id)
+    updateShortcutHint()
   }
 
   private func configureSearchField() {
     searchField.placeholderString = "Search windows"
     searchField.delegate = self
-    searchField.font = .systemFont(ofSize: 20)
+    searchField.font = .systemFont(ofSize: 18)
+    searchField.isBezeled = true
+    searchField.drawsBackground = false
+    searchField.focusRingType = .none
+    searchField.setAccessibilityLabel("Search windows")
     searchField.translatesAutoresizingMaskIntoConstraints = false
     searchField.onMoveSelection = { [weak self] offset in
       self?.session.moveSelection(by: offset)
@@ -336,6 +503,8 @@ final class SearchPanelViewController: NSViewController,
       identifier: NSUserInterfaceItemIdentifier("SearchResults")
     )
     column.resizingMask = .autoresizingMask
+    outlineView.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
+    outlineView.autoresizingMask = [.width]
     outlineView.addTableColumn(column)
     outlineView.outlineTableColumn = column
     outlineView.headerView = nil
@@ -345,9 +514,10 @@ final class SearchPanelViewController: NSViewController,
     outlineView.allowsMultipleSelection = false
     outlineView.backgroundColor = .clear
     outlineView.focusRingType = .none
+    outlineView.style = .plain
     outlineView.indentationPerLevel = 18
-    outlineView.intercellSpacing = NSSize(width: 0, height: 4)
-    outlineView.rowHeight = 30
+    outlineView.intercellSpacing = NSSize(width: 0, height: 2)
+    outlineView.rowHeight = 46
     outlineView.target = self
     outlineView.action = #selector(activateClickedRow)
     outlineView.onMoveSelection = { [weak self] offset in
@@ -366,6 +536,8 @@ final class SearchPanelViewController: NSViewController,
     scrollView.documentView = outlineView
     scrollView.drawsBackground = false
     scrollView.hasVerticalScroller = true
+    scrollView.hasHorizontalScroller = false
+    scrollView.horizontalScrollElasticity = .none
     scrollView.autohidesScrollers = true
     scrollView.translatesAutoresizingMaskIntoConstraints = false
   }
@@ -446,9 +618,20 @@ final class SearchPanelViewController: NSViewController,
       }
     }
     synchronizeSelection()
+    updateShortcutHint()
+    let resultHeight = (0..<outlineView.numberOfRows).reduce(CGFloat(0)) { height, row in
+      guard let item = outlineView.item(atRow: row) else { return height }
+      return height + self.outlineView(outlineView, heightOfRowByItem: item) + 2
+    }
+    let footerHeight: CGFloat = session.unavailableApplicationCount == 0 ? 38 : 58
+    resultsBottomConstraint?.constant = -footerHeight
+    onPreferredHeightChange?(
+      session.contentState == .results
+        ? max(180, resultHeight + 72 + footerHeight) : 240)
 
     let contentState = session.contentState
-    freshnessLabel.stringValue = "\(session.unavailableApplicationCount) app(s) could not be refreshed. Results may be incomplete."
+    freshnessLabel.stringValue =
+      "\(session.unavailableApplicationCount) app(s) could not be refreshed. Results may be incomplete."
     freshnessLabel.isHidden = session.unavailableApplicationCount == 0
     let showsResults = contentState == .results
     scrollView.isHidden = !showsResults
@@ -504,50 +687,45 @@ final class SearchPanelViewController: NSViewController,
     }
   }
 
-  private func makeResultCell(
-    identifier: NSUserInterfaceItemIdentifier
-  ) -> NSTableCellView {
-    let cell = NSTableCellView()
-    cell.identifier = identifier
-
-    let label = NSTextField(labelWithString: "")
-    label.lineBreakMode = .byTruncatingTail
-    label.translatesAutoresizingMaskIntoConstraints = false
-    cell.textField = label
-    cell.addSubview(label)
-
-    NSLayoutConstraint.activate([
-      label.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 4),
-      label.trailingAnchor.constraint(
-        equalTo: cell.trailingAnchor,
-        constant: -8
-      ),
-      label.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
-    ])
-    return cell
+  func outlineView(_ outlineView: NSOutlineView, rowViewForItem item: Any) -> NSTableRowView? {
+    SearchResultRowView()
   }
 
-  private func confidencePrefixedTitle(
-    for node: WindowSearchNode
-  ) -> String {
-    guard let window = node.window else {
-      return node.displayTitle
-    }
-    if case .stale = window.discoveryFreshness {
-      return "\(node.displayTitle) — Last known"
-    }
+  func outlineView(_ outlineView: NSOutlineView, heightOfRowByItem item: Any) -> CGFloat {
+    guard let node = item as? WindowSearchNode else { return 46 }
+    return node.isApplication ? 36 : 42
+  }
 
-    switch window.discoveryConfidence {
-    case .exact:
-      return node.displayTitle
-    case .probable:
-      return "≈ \(node.displayTitle)"
-    case .inventoryOnly:
-      return "◇ \(node.displayTitle)"
+  private func applicationIcon(for window: WindowItem) -> NSImage? {
+    if let cached = applicationIcons[window.processIdentifier] { return cached }
+    let app = NSRunningApplication(processIdentifier: window.processIdentifier)
+    let bundleURL =
+      app?.bundleURL
+      ?? window.applicationBundleIdentifier.flatMap {
+        NSWorkspace.shared.urlForApplication(withBundleIdentifier: $0)
+      }
+    let icon = bundleURL.map { NSWorkspace.shared.icon(forFile: $0.path) } ?? app?.icon
+    if let icon { applicationIcons[window.processIdentifier] = icon }
+    return icon
+  }
+
+  private func updateShortcutHint() {
+    shortcutLabel.isHidden = session.contentState != .results
+    if let node = session.selectedNode, node.isApplication {
+      shortcutLabel.stringValue =
+        session.isExpanded(node)
+        ? "↑↓ Navigate    ↵ Collapse group    esc Close"
+        : "↑↓ Navigate    ↵ Expand group    esc Close"
+    } else {
+      shortcutLabel.stringValue = "↑↓ Navigate    ↵ Switch window    esc Close"
     }
   }
 
   private func activateSelectedWindow() {
+    if let node = session.selectedNode, node.isApplication {
+      session.setApplicationExpanded(nodeID: node.id, expanded: !session.isExpanded(node))
+      return
+    }
     guard let window = session.selectedWindow else {
       return
     }
@@ -588,13 +766,12 @@ final class SearchPanelViewController: NSViewController,
     let row = outlineView.clickedRow
     guard
       row >= 0,
-      let node = outlineView.item(atRow: row) as? WindowSearchNode,
-      let window = node.window
+      let node = outlineView.item(atRow: row) as? WindowSearchNode
     else {
       return
     }
-    session.selectWindow(id: window.id)
-    onActivateWindow?(window)
+    session.selectNode(id: node.id)
+    activateSelectedWindow()
   }
 
   @objc

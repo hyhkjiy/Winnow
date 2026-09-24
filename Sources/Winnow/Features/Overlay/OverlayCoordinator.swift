@@ -25,13 +25,17 @@ final class OverlayCoordinator {
   private let uptime: () -> TimeInterval
   private(set) var isVisible = false
 
-  static func panelFrame(in visibleFrame: NSRect) -> NSRect {
+  static func panelFrame(
+    in visibleFrame: NSRect,
+    preferredHeight: CGFloat = 500
+  ) -> NSRect {
     let horizontalMargin: CGFloat = 40
     let verticalMargin: CGFloat = 60
     let topInset: CGFloat = 72
+    let availableHeight = max(0, visibleFrame.height - verticalMargin * 2)
     let size = NSSize(
-      width: min(720, max(320, visibleFrame.width - horizontalMargin * 2)),
-      height: min(500, max(240, visibleFrame.height - verticalMargin * 2))
+      width: min(640, max(320, visibleFrame.width - horizontalMargin * 2)),
+      height: min(500, max(180, preferredHeight), availableHeight)
     )
     let origin = NSPoint(
       x: visibleFrame.midX - size.width / 2,
@@ -108,7 +112,8 @@ final class OverlayCoordinator {
     promotePrimary(displayID: primaryScreen.displayID)
     if shouldDiscoverWindows {
       if let cacheUpdatedAt, Date().timeIntervalSince(cacheUpdatedAt) < 10 {
-        session.replaceWindows(with: cachedWindows, unavailableApplicationCount: cachedUnavailableApplicationCount)
+        session.replaceWindows(
+          with: cachedWindows, unavailableApplicationCount: cachedUnavailableApplicationCount)
       }
       refreshWindows()
     }
@@ -174,7 +179,8 @@ final class OverlayCoordinator {
         cachedWindows = windows
         cacheUpdatedAt = Date()
         if isVisible {
-          session.replaceWindows(with: windows, unavailableApplicationCount: report.unavailableApplicationCount)
+          session.replaceWindows(
+            with: windows, unavailableApplicationCount: report.unavailableApplicationCount)
         }
       } catch {
         guard !Task.isCancelled else { return }
@@ -220,6 +226,7 @@ final class OverlayCoordinator {
 
   private func makePanel(for screen: NSScreen) -> PanelEntry {
     let frame = Self.panelFrame(in: screen.visibleFrame)
+    var preferredHeight = frame.height
 
     let panel = SearchPanel(
       contentRect: frame,
@@ -251,12 +258,27 @@ final class OverlayCoordinator {
     controller.onCancel = { [weak self] in
       self?.hide()
     }
+    controller.onPreferredHeightChange = { [weak panel] requestedHeight in
+      preferredHeight = requestedHeight
+      guard let panel else { return }
+      let frame = Self.panelFrame(
+        in: screen.visibleFrame,
+        preferredHeight: requestedHeight
+      )
+      panel.setFrame(frame, display: true, animate: false)
+    }
     controller.view.frame = NSRect(origin: .zero, size: frame.size)
     panel.contentViewController = controller
     // Installing a content view controller can resize an AppKit window to the
     // controller's initial fitting size. Re-apply the intended screen frame so
     // the panel does not keep the old lower-left origin with a compressed size.
-    panel.setFrame(frame, display: false)
+    panel.setFrame(
+      Self.panelFrame(
+        in: screen.visibleFrame,
+        preferredHeight: preferredHeight
+      ),
+      display: false
+    )
 
     return PanelEntry(panel: panel, controller: controller)
   }
