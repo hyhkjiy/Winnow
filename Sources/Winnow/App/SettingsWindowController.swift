@@ -3,15 +3,22 @@ import AppKit
 @MainActor
 final class SettingsWindowController: NSWindowController {
   var onRequestAccessibility: (() -> Void)?
+  var onRequestScreenCapture: (() -> Void)?
 
   private let permissionClient: AccessibilityPermissionClient
-  private let permissionLabel = NSTextField(labelWithString: "")
+  private let screenCapturePermissionClient: ScreenCapturePermissionClient
+  private let accessibilityPermissionLabel = NSTextField(labelWithString: "")
+  private let screenCapturePermissionLabel = NSTextField(labelWithString: "")
 
-  init(permissionClient: AccessibilityPermissionClient) {
+  init(
+    permissionClient: AccessibilityPermissionClient,
+    screenCapturePermissionClient: ScreenCapturePermissionClient
+  ) {
     self.permissionClient = permissionClient
+    self.screenCapturePermissionClient = screenCapturePermissionClient
 
     let window = NSWindow(
-      contentRect: NSRect(x: 0, y: 0, width: 440, height: 220),
+      contentRect: NSRect(x: 0, y: 0, width: 500, height: 310),
       styleMask: [.titled, .closable],
       backing: .buffered,
       defer: false
@@ -42,8 +49,8 @@ final class SettingsWindowController: NSWindowController {
 
     let explanation = NSTextField(
       wrappingLabelWithString:
-        "Winnow needs Accessibility permission to discover and focus windows. "
-        + "It does not request Screen Recording permission."
+        "Accessibility lets Winnow inspect and focus windows. Screen Recording "
+        + "lets it discover more windows on other Spaces. Window data remains in memory."
     )
     explanation.textColor = .secondaryLabelColor
 
@@ -54,8 +61,22 @@ final class SettingsWindowController: NSWindowController {
     )
     permissionButton.bezelStyle = .rounded
 
+    let screenCaptureButton = NSButton(
+      title: "Request Screen Recording Permission",
+      target: self,
+      action: #selector(requestScreenCapturePermission)
+    )
+    screenCaptureButton.bezelStyle = .rounded
+
     let stack = NSStackView(
-      views: [title, explanation, permissionLabel, permissionButton]
+      views: [
+        title,
+        explanation,
+        accessibilityPermissionLabel,
+        permissionButton,
+        screenCapturePermissionLabel,
+        screenCaptureButton,
+      ]
     )
     stack.orientation = .vertical
     stack.alignment = .leading
@@ -77,11 +98,18 @@ final class SettingsWindowController: NSWindowController {
   }
 
   private func refreshPermissionStatus() {
-    permissionLabel.stringValue =
+    accessibilityPermissionLabel.stringValue =
       permissionClient.isTrusted
       ? "Accessibility: Granted"
       : "Accessibility: Not granted"
-    permissionLabel.textColor = permissionClient.isTrusted ? .systemGreen : .systemOrange
+    accessibilityPermissionLabel.textColor =
+      permissionClient.isTrusted ? .systemGreen : .systemOrange
+    screenCapturePermissionLabel.stringValue =
+      screenCapturePermissionClient.isGranted
+      ? "Screen Recording: Granted"
+      : "Screen Recording: Not granted"
+    screenCapturePermissionLabel.textColor =
+      screenCapturePermissionClient.isGranted ? .systemGreen : .systemOrange
   }
 
   @objc
@@ -90,6 +118,16 @@ final class SettingsWindowController: NSWindowController {
       onRequestAccessibility()
     } else {
       permissionClient.requestAccess()
+    }
+    refreshPermissionStatus()
+  }
+
+  @objc
+  private func requestScreenCapturePermission() {
+    if let onRequestScreenCapture {
+      onRequestScreenCapture()
+    } else {
+      screenCapturePermissionClient.requestAccess()
     }
     refreshPermissionStatus()
   }

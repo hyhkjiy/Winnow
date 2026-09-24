@@ -205,15 +205,90 @@ final class AXWindowActivatorTests: XCTestCase {
     )
   }
 
+  func testInventoryOnlyWindowActivatesApplicationThenRecoversExactReference() async throws {
+    let client = FakeAXWindowSystemClient()
+    let refreshedWindow = window(
+      reference: makeAXReference(),
+      windowServerIdentifier: 91
+    )
+    let discovery = StubWindowDiscovery(result: .success([refreshedWindow]))
+    let activator = AXWindowActivator(
+      systemClient: client,
+      windowDiscovery: discovery
+    )
+
+    try await activator.activate(
+      window(
+        reference: nil,
+        windowServerIdentifier: 91
+      )
+    )
+
+    XCTAssertEqual(discovery.callCount, 1)
+    XCTAssertEqual(
+      client.events,
+      [
+        "menu:Project Notes",
+        "unhide:42",
+        "activate:42",
+        "trust",
+        "unhide:42",
+        "activate:42",
+        "raise",
+        "main",
+        "focused",
+      ]
+    )
+  }
+
+  func testInventoryOnlyWindowUsesUniqueWindowMenuItemBeforeRediscovery() async throws {
+    let client = FakeAXWindowSystemClient()
+    client.menuSelectionResult = true
+    let discovery = StubWindowDiscovery(
+      result: .success([
+        window(
+          reference: makeAXReference(),
+          windowServerIdentifier: 92
+        )
+      ])
+    )
+    let activator = AXWindowActivator(
+      systemClient: client,
+      windowDiscovery: discovery
+    )
+
+    try await activator.activate(
+      window(
+        reference: nil,
+        windowServerIdentifier: 92
+      )
+    )
+
+    XCTAssertEqual(
+      client.events,
+      [
+        "menu:Project Notes",
+        "trust",
+        "unhide:42",
+        "activate:42",
+        "raise",
+        "main",
+        "focused",
+      ]
+    )
+  }
+
   private func window(
-    reference: AXWindowReference = makeAXReference(),
+    reference: AXWindowReference? = makeAXReference(),
     isMinimized: Bool = false,
-    sameTitleWindowCount: Int = 1
+    sameTitleWindowCount: Int = 1,
+    windowServerIdentifier: CGWindowID? = nil
   ) -> WindowItem {
     WindowItem(
       processIdentifier: 42,
       applicationName: "Safari",
       title: "Project Notes",
+      windowServerIdentifier: windowServerIdentifier,
       sameTitleWindowCount: sameTitleWindowCount,
       isMinimized: isMinimized,
       accessibilityReference: reference

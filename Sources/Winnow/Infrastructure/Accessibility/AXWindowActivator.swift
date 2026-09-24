@@ -20,6 +20,11 @@ final class AXWindowActivator: WindowActivating, @unchecked Sendable {
   }
 
   func activate(_ window: WindowItem) async throws {
+    if window.accessibilityReference == nil {
+      try await recoverInventoryOnlyWindow(window)
+      return
+    }
+
     do {
       try await performPreciseActivation(window)
       return
@@ -66,6 +71,54 @@ final class AXWindowActivator: WindowActivating, @unchecked Sendable {
       try await performApplicationFallback(
         processIdentifier: window.processIdentifier
       )
+    }
+  }
+
+  private func recoverInventoryOnlyWindow(
+    _ window: WindowItem
+  ) async throws {
+    let selectedFromMenu: Bool
+    do {
+      selectedFromMenu = try await performOnQueue { [systemClient] in
+        try systemClient.selectWindowFromMenu(
+          processIdentifier: window.processIdentifier,
+          title: window.title
+        )
+      }
+    } catch {
+      Self.log(error, processIdentifier: window.processIdentifier)
+      selectedFromMenu = false
+    }
+    if !selectedFromMenu {
+      try await performApplicationFallback(
+        processIdentifier: window.processIdentifier
+      )
+    }
+    try? await Task.sleep(nanoseconds: 200_000_000)
+
+    let refreshedWindow: WindowItem?
+    do {
+      refreshedWindow = try await windowDiscovery.discoverWindows().first {
+        $0.processIdentifier == window.processIdentifier
+          && $0.applicationBundleIdentifier
+            == window.applicationBundleIdentifier
+          && $0.title == window.title
+          && $0.accessibilityReference != nil
+          && Self.matchesIdentity(candidate: $0, original: window)
+      }
+    } catch {
+      Self.log(error, processIdentifier: window.processIdentifier)
+      return
+    }
+
+    guard let refreshedWindow else {
+      return
+    }
+
+    do {
+      try await performPreciseActivation(refreshedWindow)
+    } catch {
+      Self.log(error, processIdentifier: window.processIdentifier)
     }
   }
 
@@ -165,6 +218,9 @@ final class AXWindowActivator: WindowActivating, @unchecked Sendable {
     candidate: WindowItem,
     original: WindowItem
   ) -> Bool {
+    if let windowServerIdentifier = original.windowServerIdentifier {
+      return candidate.windowServerIdentifier == windowServerIdentifier
+    }
     if let identifier = original.accessibilityIdentifier {
       return candidate.accessibilityIdentifier == identifier
     }

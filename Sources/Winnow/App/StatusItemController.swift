@@ -3,9 +3,11 @@ import AppKit
 @MainActor
 final class StatusItemController: NSObject, NSMenuDelegate {
   private let statusItem: NSStatusItem
+  private let statusMenu = NSMenu()
   private let onToggleOverlay: () -> Void
   private let onOpenSettings: () -> Void
   private let onRequestAccessibility: () -> Void
+  private let onRequestScreenCapture: () -> Void
   private let onDiscoverWindows: () async throws -> [WindowItem]
   private let onActivateWindow: (WindowItem) async -> Void
   private let debugWindowsMenu = NSMenu(title: "Debug Windows")
@@ -16,12 +18,14 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     onToggleOverlay: @escaping () -> Void,
     onOpenSettings: @escaping () -> Void,
     onRequestAccessibility: @escaping () -> Void,
+    onRequestScreenCapture: @escaping () -> Void,
     onDiscoverWindows: @escaping () async throws -> [WindowItem],
     onActivateWindow: @escaping (WindowItem) async -> Void
   ) {
     self.onToggleOverlay = onToggleOverlay
     self.onOpenSettings = onOpenSettings
     self.onRequestAccessibility = onRequestAccessibility
+    self.onRequestScreenCapture = onRequestScreenCapture
     self.onDiscoverWindows = onDiscoverWindows
     self.onActivateWindow = onActivateWindow
     statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
@@ -52,11 +56,14 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     if image == nil {
       button.title = "W"
     }
+    button.target = self
+    button.action = #selector(showStatusMenu(_:))
+    button.sendAction(on: [.leftMouseUp, .rightMouseUp])
   }
 
   private func configureMenu() {
-    let menu = NSMenu()
-    menu.addItem(
+    statusMenu.delegate = self
+    statusMenu.addItem(
       NSMenuItem(
         title: "Show Winnow",
         action: #selector(toggleOverlay),
@@ -68,25 +75,31 @@ final class StatusItemController: NSObject, NSMenuDelegate {
       action: nil,
       keyEquivalent: ""
     )
-    debugWindowsMenu.delegate = self
     debugWindowsItem.submenu = debugWindowsMenu
-    menu.addItem(debugWindowsItem)
-    menu.addItem(
+    statusMenu.addItem(debugWindowsItem)
+    statusMenu.addItem(
       NSMenuItem(
         title: "Accessibility Permission…",
         action: #selector(requestAccessibility),
         keyEquivalent: ""
       )
     )
-    menu.addItem(
+    statusMenu.addItem(
+      NSMenuItem(
+        title: "Screen Recording Permission…",
+        action: #selector(requestScreenCapture),
+        keyEquivalent: ""
+      )
+    )
+    statusMenu.addItem(
       NSMenuItem(
         title: "Settings…",
         action: #selector(openSettings),
         keyEquivalent: ","
       )
     )
-    menu.addItem(.separator())
-    menu.addItem(
+    statusMenu.addItem(.separator())
+    statusMenu.addItem(
       NSMenuItem(
         title: "Quit Winnow",
         action: #selector(quit),
@@ -94,23 +107,25 @@ final class StatusItemController: NSObject, NSMenuDelegate {
       )
     )
 
-    for item in menu.items {
+    for item in statusMenu.items {
       item.target = self
     }
-
-    statusItem.menu = menu
   }
 
-  nonisolated func menuWillOpen(_: NSMenu) {
+  nonisolated func menuWillOpen(_ menu: NSMenu) {
     MainActor.assumeIsolated {
+      guard menu === statusMenu else {
+        return
+      }
       refreshDebugWindows()
     }
   }
 
   private func refreshDebugWindows() {
     discoveryTask?.cancel()
-    debugWindows.removeAll()
-    replaceDebugMenu(withPlaceholder: "Loading…")
+    if debugWindowsMenu.items.isEmpty {
+      replaceDebugMenu(withPlaceholder: "Loading…")
+    }
 
     discoveryTask = Task { [weak self] in
       guard let self else {
@@ -139,6 +154,13 @@ final class StatusItemController: NSObject, NSMenuDelegate {
     }
   }
 
+  @objc
+  private func showStatusMenu(_ button: NSStatusBarButton) {
+    statusItem.menu = statusMenu
+    button.performClick(nil)
+    statusItem.menu = nil
+  }
+
   private func replaceDebugMenu(with windows: [WindowItem]) {
     debugWindowsMenu.removeAllItems()
     debugWindows = Dictionary(
@@ -150,16 +172,59 @@ final class StatusItemController: NSObject, NSMenuDelegate {
       return
     }
 
-    for window in windows {
-      let item = NSMenuItem(
-        title: "\(window.applicationName) — \(window.title)",
-        action: #selector(activateDebugWindow(_:)),
-        keyEquivalent: ""
-      )
-      item.target = self
-      item.representedObject = window.id.uuidString
-      debugWindowsMenu.addItem(item)
+    for entry in WindowMenuGrouping.entries(for: windows) {
+      switch entry {
+      case .window(let displayTitle, let window):
+        debugWindowsMenu.addItem(
+          debugWindowMenuItem(
+            for: window,
+            displayTitle: displayTitle
+          )
+        )
+      case .application(let group):
+        let applicationItem = NSMenuItem(
+          title: "\(group.applicationName) (\(group.windows.count))",
+          action: nil,
+          keyEquivalent: ""
+        )
+        let windowsMenu = NSMenu(title: group.applicationName)
+
+        for window in group.windows {
+          let item = debugWindowMenuItem(for: window)
+          windowsMenu.addItem(item)
+        }
+
+        applicationItem.submenu = windowsMenu
+        debugWindowsMenu.addItem(applicationItem)
+      }
     }
+  }
+
+  private func debugWindowMenuItem(
+    for window: WindowItem,
+    displayTitle: String? = nil
+  ) -> NSMenuItem {
+    let confidencePrefix: String
+    switch window.discoveryConfidence {
+    case .exact:
+      confidencePrefix = ""
+    case .probable:
+      confidencePrefix = "≈ "
+    case .inventoryOnly:
+      confidencePrefix = "◇ "
+    }
+    let item = NSMenuItem(
+      title: "\(confidencePrefix)\(displayTitle ?? window.title)",
+      action: #selector(activateDebugWindow(_:)),
+      keyEquivalent: ""
+    )
+    item.toolTip =
+      window.accessibilityReference == nil
+      ? "Discovered from the window inventory; exact focus will be recovered on selection."
+      : "An Accessibility window reference is available."
+    item.target = self
+    item.representedObject = window.id.uuidString
+    return item
   }
 
   private func replaceDebugMenu(withPlaceholder title: String) {
@@ -186,6 +251,11 @@ final class StatusItemController: NSObject, NSMenuDelegate {
   @objc
   private func requestAccessibility() {
     onRequestAccessibility()
+  }
+
+  @objc
+  private func requestScreenCapture() {
+    onRequestScreenCapture()
   }
 
   @objc

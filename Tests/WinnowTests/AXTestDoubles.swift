@@ -11,16 +11,19 @@ final class FakeAXWindowSystemClient: AXWindowSystemClient, @unchecked Sendable 
   var applications: [RunningApplicationSnapshot] = []
   var windowsByProcessIdentifier: [pid_t: [AXWindowSnapshot]] = [:]
   var windowErrors: [pid_t: AXWindowSystemError] = [:]
+  var windowDelays: [pid_t: TimeInterval] = [:]
   var invalidRaiseReferences: Set<ObjectIdentifier> = []
   var raiseErrors: [ObjectIdentifier: AXError] = [:]
   var mainErrors: [ObjectIdentifier: AXError] = [:]
   var focusedErrors: [ObjectIdentifier: AXError] = [:]
   var unhideResult = true
   var activationResult = true
+  var menuSelectionResult = false
   var isOnExpectedQueue: () -> Bool = { true }
 
   private var recordedEvents: [String] = []
   private var recordedUnexpectedQueueCalls = 0
+  private var recordedWindowCallCounts: [pid_t: Int] = [:]
 
   var events: [String] {
     lock.withLock { recordedEvents }
@@ -28,6 +31,10 @@ final class FakeAXWindowSystemClient: AXWindowSystemClient, @unchecked Sendable 
 
   var unexpectedQueueCalls: Int {
     lock.withLock { recordedUnexpectedQueueCalls }
+  }
+
+  func windowCallCount(for processIdentifier: pid_t) -> Int {
+    lock.withLock { recordedWindowCallCounts[processIdentifier, default: 0] }
   }
 
   var isProcessTrusted: Bool {
@@ -42,12 +49,28 @@ final class FakeAXWindowSystemClient: AXWindowSystemClient, @unchecked Sendable 
 
   func windows(for processIdentifier: pid_t) throws -> [AXWindowSnapshot] {
     record("windows:\(processIdentifier)")
-    return try lock.withLock {
+    let request = try lock.withLock { () -> (TimeInterval, [AXWindowSnapshot]) in
+      recordedWindowCallCounts[processIdentifier, default: 0] += 1
       if let error = windowErrors[processIdentifier] {
         throw error
       }
-      return windowsByProcessIdentifier[processIdentifier] ?? []
+      return (
+        windowDelays[processIdentifier] ?? 0,
+        windowsByProcessIdentifier[processIdentifier] ?? []
+      )
     }
+    if request.0 > 0 {
+      Thread.sleep(forTimeInterval: request.0)
+    }
+    return request.1
+  }
+
+  func selectWindowFromMenu(
+    processIdentifier: pid_t,
+    title: String
+  ) throws -> Bool {
+    record("menu:\(title)")
+    return lock.withLock { menuSelectionResult }
   }
 
   func unhideApplication(processIdentifier: pid_t) -> Bool {
@@ -100,6 +123,47 @@ final class FakeAXWindowSystemClient: AXWindowSystemClient, @unchecked Sendable 
       if !isOnExpectedQueue() {
         recordedUnexpectedQueueCalls += 1
       }
+    }
+  }
+}
+
+final class FakeWindowInventoryClient: WindowInventoryClient, @unchecked Sendable {
+  private let lock = NSLock()
+  private var storedWindows: [WindowInventorySnapshot] = []
+  private var recordedCallCount = 0
+  private var recordedImmediateCallCount = 0
+
+  var windowsResult: [WindowInventorySnapshot] {
+    get {
+      lock.withLock { storedWindows }
+    }
+    set {
+      lock.withLock {
+        storedWindows = newValue
+      }
+    }
+  }
+
+  var callCount: Int {
+    lock.withLock { recordedCallCount }
+  }
+
+  var immediateCallCount: Int {
+    lock.withLock { recordedImmediateCallCount }
+  }
+
+  func windows() async throws -> [WindowInventorySnapshot] {
+    lock.withLock {
+      recordedCallCount += 1
+      return storedWindows
+    }
+  }
+
+
+  func immediateWindows() -> [WindowInventorySnapshot] {
+    lock.withLock {
+      recordedImmediateCallCount += 1
+      return storedWindows
     }
   }
 }

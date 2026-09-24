@@ -33,4 +33,17 @@ final class WindowFilterTests: XCTestCase {
       [windows[1]]
     )
   }
+
+  func testMatchesChineseApplicationByPinyinInitials() {
+    let weChat = WindowItem(
+      processIdentifier: 3,
+      applicationName: "微信",
+      title: "文件传输助手"
+    )
+
+    XCTAssertEqual(
+      WindowFilter.filter([weChat], query: "wx"),
+      [weChat]
+    )
+  }
 }

@@ -24,6 +24,8 @@
     <true/>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>NSScreenCaptureUsageDescription</key>
+    <string>Winnow uses screen recording access to discover windows on other Spaces. It does not record or retain screen content.</string>
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>
 </dict>
